@@ -1,0 +1,72 @@
+﻿syntax = "proto2";
+
+package polo.wire.protobuf;
+
+option java_package = "com.sprit.tvremote.proto.polo";
+option java_multiple_files = true;
+option java_outer_classname = "PoloProto";
+
+message OuterMessage {
+  enum Status {
+    STATUS_OK = 200;
+    STATUS_ERROR = 400;
+    STATUS_BAD_CONFIGURATION = 401;
+    STATUS_BAD_SECRET = 402;
+  }
+  required uint32 protocol_version = 1;
+  required polo.wire.protobuf.OuterMessage.Status status = 2;
+  optional polo.wire.protobuf.PairingRequest pairing_request = 10;
+  optional polo.wire.protobuf.PairingRequestAck pairing_request_ack = 11;
+  optional polo.wire.protobuf.Options options = 20;
+  optional polo.wire.protobuf.Configuration configuration = 30;
+  optional polo.wire.protobuf.ConfigurationAck configuration_ack = 31;
+  optional polo.wire.protobuf.Secret secret = 40;
+  optional polo.wire.protobuf.SecretAck secret_ack = 41;
+}
+
+message PairingRequest {
+  required string service_name = 1;
+  optional string client_name = 2;
+}
+
+message PairingRequestAck {
+  optional string server_name = 1;
+}
+
+message Options {
+  enum RoleType {
+    ROLE_TYPE_UNKNOWN = 0;
+    ROLE_TYPE_INPUT = 1;
+    ROLE_TYPE_OUTPUT = 2;
+  }
+  message Encoding {
+    enum EncodingType {
+      ENCODING_TYPE_UNKNOWN = 0;
+      ENCODING_TYPE_ALPHANUMERIC = 1;
+      ENCODING_TYPE_NUMERIC = 2;
+      ENCODING_TYPE_HEXADECIMAL = 3;
+      ENCODING_TYPE_QRCODE = 4;
+    }
+    required polo.wire.protobuf.Options.Encoding.EncodingType type = 1;
+    required uint32 symbol_length = 2;
+  }
+  repeated polo.wire.protobuf.Options.Encoding input_encodings = 1;
+  repeated polo.wire.protobuf.Options.Encoding output_encodings = 2;
+  optional polo.wire.protobuf.Options.RoleType preferred_role = 3;
+}
+
+message Configuration {
+  required polo.wire.protobuf.Options.Encoding encoding = 1;
+  required polo.wire.protobuf.Options.RoleType client_role = 2;
+}
+
+message ConfigurationAck {
+}
+
+message Secret {
+  required bytes secret = 1;
+}
+
+message SecretAck {
+  required bytes secret = 1;
+}

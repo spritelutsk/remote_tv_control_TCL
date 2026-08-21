@@ -1,0 +1,12 @@
+# Каталоги сборки и кэши
+.gradle/
+.kotlin/
+build/
+dist/
+*.apk
+
+# Локальные настройки машины и IDE
+local.properties
+.idea/
+*.iml
+*.keystore

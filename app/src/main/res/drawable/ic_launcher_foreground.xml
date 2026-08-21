@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Силуэт пульта: корпус, кнопка питания, круг навигации и пара кнопок. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M44,24h20a8,8 0 0 1 8,8v44a8,8 0 0 1 -8,8h-20a8,8 0 0 1 -8,-8v-44a8,8 0 0 1 8,-8z" />
+    <path
+        android:fillColor="#0F2A44"
+        android:pathData="M50,32.5a3.5,3.5 0 1 0 7,0a3.5,3.5 0 1 0 -7,0z" />
+    <path
+        android:fillColor="#0F2A44"
+        android:pathData="M54,44m-10,0a10,10 0 1 0 20,0a10,10 0 1 0 -20,0zM54,44m-5,0a5,5 0 1 0 10,0a5,5 0 1 0 -10,0z" />
+    <path
+        android:fillColor="#0F2A44"
+        android:pathData="M46.5,66.5a3,3 0 1 0 6,0a3,3 0 1 0 -6,0z" />
+    <path
+        android:fillColor="#0F2A44"
+        android:pathData="M55.5,66.5a3,3 0 1 0 6,0a3,3 0 1 0 -6,0z" />
+    <path
+        android:fillColor="#0F2A44"
+        android:pathData="M46.5,74.5a3,3 0 1 0 6,0a3,3 0 1 0 -6,0z" />
+    <path
+        android:fillColor="#0F2A44"
+        android:pathData="M55.5,74.5a3,3 0 1 0 6,0a3,3 0 1 0 -6,0z" />
+</vector>
