@@ -49,6 +49,7 @@ Three findings that cost real debugging time are written up in `README.md` under
 ## Build Environment
 
 - The project path contains Cyrillic characters. `android.overridePathCheck=true` silences AGP,
-  and the build directory is redirected to `%TEMP%\tv-remote-build` — otherwise the Gradle test
-  worker cannot load classes. Built APKs are copied back into `dist/` by the `exportApk` task.
+  and the build directory moves to `%TEMP%\tv-remote-build-<hash of path>` — otherwise the Gradle
+  test worker cannot load classes. Under an ASCII path nothing is redirected. Built APKs land in
+  `dist/` via the `exportApk` task either way.
 - `local.properties` (SDK path) is machine-specific and not tracked.

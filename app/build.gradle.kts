@@ -4,10 +4,15 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// Путь к проекту содержит кириллицу, а часть инструментов сборки её не переносит: protoc не
-// находит файлы, а тест-воркер Gradle не может загрузить классы из classpath. Поэтому всё
-// промежуточное складываем в ASCII-каталог, а готовые APK возвращаем в dist/.
-layout.buildDirectory.set(File(System.getProperty("java.io.tmpdir"), "tv-remote-build/app"))
+// Часть инструментов Android не переносит не-ASCII в пути: protoc не находит файлы, а
+// тест-воркер Gradle не может загрузить классы из classpath. Если каталог проекта содержит
+// такие символы, уводим сборку в ASCII-каталог — свой для каждой копии проекта, иначе две
+// копии дерутся за один и тот же build. Готовые APK в любом случае попадают в dist/.
+val projectPath: String = rootDir.absolutePath
+if (projectPath.any { it.code > 127 }) {
+    val unique = Integer.toHexString(projectPath.hashCode())
+    layout.buildDirectory.set(File(System.getProperty("java.io.tmpdir"), "tv-remote-build-$unique/app"))
+}
 
 android {
     namespace = "com.sprit.tvremote"
