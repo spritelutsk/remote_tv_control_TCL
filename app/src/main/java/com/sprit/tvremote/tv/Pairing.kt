@@ -19,6 +19,14 @@ class PairingFailed(message: String) : Exception(message)
 class PairingCancelled : Exception("Спаривание отменено")
 
 /**
+ * Телевизор отверг код: сессия спаривания на нём одноразовая. Если после `STATUS_BAD_SECRET`
+ * отправить секрет снова на том же соединении, телевизор не отвечает вовсе (проверено на живом
+ * устройстве) — он не читает повторную попытку, а просто молчит, пока не истечёт таймаут.
+ * Значит для повтора нужно новое TCP-соединение, а не повторное сообщение на старом.
+ */
+private class WrongSecret : Exception()
+
+/**
  * Спаривание с телевизором по протоколу Polo (порт 6467).
  *
  * Обмен идёт сообщениями [OuterMessage]: запрос спаривания → согласование кодировки →
@@ -36,6 +44,12 @@ object Pairing {
      * Провести спаривание целиком. [requestPin] показывает пользователю диалог и возвращает
      * введённый код или `null`, если он передумал.
      *
+     * Код может быть отвергнут двумя разными способами: опечатка ловится локально (её видно
+     * по контрольной сумме, ничего не уходит в сеть) и просто просит ввести заново на том же
+     * соединении. А код, который прошёл локальную проверку, но не совпал с настоящим (например,
+     * телевизор уже показывает новый, а введён старый), телевизор отвергает необратимо для этого
+     * соединения — тогда переподключаемся заново, и телевизор обычно показывает свежий код.
+     *
      * @throws PairingFailed при ошибке протокола
      * @throws PairingCancelled если пользователь отказался
      */
@@ -43,12 +57,33 @@ object Pairing {
         host: String,
         sslContext: SSLContext,
         clientCertificate: X509Certificate,
+        /** Не для настоящего телевизора — юнит-тесты подставляют сюда сервер-заглушку. */
+        port: Int = PAIRING_PORT,
         requestPin: suspend (deviceName: String, retry: Boolean) -> String?,
     ) = withContext(Dispatchers.IO) {
+        var retry = false
+        while (true) {
+            try {
+                pairOnce(host, port, sslContext, clientCertificate, retry, requestPin)
+                return@withContext
+            } catch (_: WrongSecret) {
+                retry = true
+            }
+        }
+    }
+
+    private suspend fun pairOnce(
+        host: String,
+        port: Int,
+        sslContext: SSLContext,
+        clientCertificate: X509Certificate,
+        retry: Boolean,
+        requestPin: suspend (deviceName: String, retry: Boolean) -> String?,
+    ) {
         val socket = connectTls(
             sslContext,
             host,
-            PAIRING_PORT,
+            port,
             CONNECT_TIMEOUT_MS,
             READ_TIMEOUT_MS,
         )
@@ -68,20 +103,24 @@ object Pairing {
                     .toByteArray(),
             )
 
+            // Отметку «код не подошёл» показываем на первом же запросе только если сюда
+            // привёл именно отказ телевизора на предыдущем соединении — не обычный запуск.
+            var askRetry = retry
             while (true) {
                 val raw = stream.read() ?: throw PairingFailed("Телевизор закрыл соединение")
                 val incoming = OuterMessage.parseFrom(raw)
+                if (incoming.status == OuterMessage.Status.STATUS_BAD_SECRET) throw WrongSecret()
                 if (incoming.status != OuterMessage.Status.STATUS_OK) {
                     throw PairingFailed(statusText(incoming.status))
                 }
                 when {
                     incoming.hasPairingRequestAck() -> stream.write(optionsMessage())
                     incoming.hasOptions() -> stream.write(configurationMessage())
-                    incoming.hasConfigurationAck() -> stream.write(
-                        secretMessage(
-                            askForSecret(clientCertificate, serverCertificate, deviceName, requestPin),
-                        ),
-                    )
+                    incoming.hasConfigurationAck() -> {
+                        val secret = askForSecret(clientCertificate, serverCertificate, deviceName, askRetry, requestPin)
+                        askRetry = false // дальше в пределах этого соединения — только опечатки
+                        stream.write(secretMessage(secret))
+                    }
                     incoming.hasSecretAck() -> return@use
                     else -> throw PairingFailed("Телевизор ответил неожиданным сообщением")
                 }
@@ -94,9 +133,10 @@ object Pairing {
         clientCertificate: X509Certificate,
         serverCertificate: X509Certificate,
         deviceName: String,
+        initialRetry: Boolean,
         requestPin: suspend (deviceName: String, retry: Boolean) -> String?,
     ): ByteArray {
-        var retry = false
+        var retry = initialRetry
         while (true) {
             val pin = requestPin(deviceName, retry)?.trim() ?: throw PairingCancelled()
             val secret = PairingSecret.compute(pin, clientCertificate, serverCertificate)
@@ -136,8 +176,8 @@ object Pairing {
         .build()
         .toByteArray()
 
+    // STATUS_BAD_SECRET сюда не попадает — его перехватывает pairOnce() ещё до этого вызова.
     private fun statusText(status: OuterMessage.Status): String = when (status) {
-        OuterMessage.Status.STATUS_BAD_SECRET -> "Телевизор не принял код спаривания"
         OuterMessage.Status.STATUS_BAD_CONFIGURATION -> "Телевизор не принял параметры спаривания"
         else -> "Телевизор ответил ошибкой ($status)"
     }

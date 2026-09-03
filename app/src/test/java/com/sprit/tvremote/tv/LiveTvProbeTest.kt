@@ -123,6 +123,211 @@ class LiveTvProbeTest {
     }
 
     /**
+     * Реальная PIN-панель телевизору недоступна отсюда — код с экрана мы прочитать не можем.
+     * Но можно подобрать заведомо ЧУЖОЙ код с корректной контрольной суммой (проходит
+     * локальную проверку в [PairingSecret], значит уходит на телевизор) и посмотреть, как
+     * телевизор его отвергнет. Если ответ — штатный `STATUS_BAD_SECRET`, служба спаривания
+     * жива и по крайней мере не «залипла»: настоящая причина отказа реального кода — не в
+     * протоколе или в сети, а в самом коде (устарел, введён с опечаткой, TV уже закрыл диалог).
+     */
+    @Test
+    fun probePairingWrongSecret() {
+        val host = System.getProperty("tv.host").orEmpty().ifBlank {
+            println("tvHost не задан — пропускаю")
+            return
+        }
+        val (context, clientCertificate) = freshClient()
+        val socket = connectTls(context, host, PAIRING_PORT, 8_000, 5 * 60 * 1000)
+        socket.use {
+            val serverCertificate =
+                socket.session.peerCertificates.first() as java.security.cert.X509Certificate
+            val stream = MessageStream(socket)
+
+            fun message() = com.sprit.tvremote.proto.polo.OuterMessage.newBuilder()
+                .setProtocolVersion(2)
+                .setStatus(com.sprit.tvremote.proto.polo.OuterMessage.Status.STATUS_OK)
+
+            fun encoding() = com.sprit.tvremote.proto.polo.Options.Encoding.newBuilder()
+                .setType(com.sprit.tvremote.proto.polo.Options.Encoding.EncodingType.ENCODING_TYPE_HEXADECIMAL)
+                .setSymbolLength(6)
+
+            stream.write(
+                message().setPairingRequest(
+                    com.sprit.tvremote.proto.polo.PairingRequest.newBuilder()
+                        .setClientName("Probe Client (wrong secret)")
+                        .setServiceName("atvremote"),
+                ).build().toByteArray(),
+            )
+
+            // Подбираем код, контрольная сумма которого совпадает с первым байтом его же SHA-256 —
+            // именно так локальная проверка отличает опечатку от «похоже на настоящий», но с
+            // настоящим кодом, который видит только экран телевизора, он не совпадёт никогда.
+            val wrongPin = (0..0xFFFF).asSequence()
+                .map { suffix -> "%04X".format(suffix) }
+                .map { suffix -> "00$suffix" to PairingSecret.compute("00$suffix", clientCertificate, serverCertificate) }
+                .firstNotNullOf { (pin, secret) -> secret?.let { pin to it } }
+            println("подобранный код с верной контрольной суммой: ${wrongPin.first} (заведомо не тот, что на экране)")
+
+            while (true) {
+                val raw = stream.read()
+                if (raw == null) {
+                    println("телевизор закрыл соединение, не дожидаясь секрета")
+                    return
+                }
+                val incoming = com.sprit.tvremote.proto.polo.OuterMessage.parseFrom(raw)
+                if (incoming.status != com.sprit.tvremote.proto.polo.OuterMessage.Status.STATUS_OK) {
+                    println("телевизор ответил статусом ${incoming.status} — служба спаривания отвечает штатно")
+                    return
+                }
+                when {
+                    incoming.hasPairingRequestAck() -> stream.write(
+                        message().setOptions(
+                            com.sprit.tvremote.proto.polo.Options.newBuilder()
+                                .setPreferredRole(com.sprit.tvremote.proto.polo.Options.RoleType.ROLE_TYPE_INPUT)
+                                .addInputEncodings(encoding()),
+                        ).build().toByteArray(),
+                    )
+                    incoming.hasOptions() -> stream.write(
+                        message().setConfiguration(
+                            com.sprit.tvremote.proto.polo.Configuration.newBuilder()
+                                .setClientRole(com.sprit.tvremote.proto.polo.Options.RoleType.ROLE_TYPE_INPUT)
+                                .setEncoding(encoding()),
+                        ).build().toByteArray(),
+                    )
+                    incoming.hasConfigurationAck() -> {
+                        println("отправляю заведомо неверный секрет…")
+                        stream.write(
+                            message().setSecret(
+                                com.sprit.tvremote.proto.polo.Secret.newBuilder()
+                                    .setSecret(com.google.protobuf.ByteString.copyFrom(wrongPin.second)),
+                            ).build().toByteArray(),
+                        )
+                    }
+                    incoming.hasSecretAck() -> {
+                        println("телевизор ПРИНЯЛ заведомо неверный секрет — это само по себе баг телевизора")
+                        return
+                    }
+                    else -> {
+                        println("неожиданное сообщение: $incoming")
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Ключевой вопрос: держит ли телевизор соединение открытым после отказа в коде, или рвёт
+     * его — от этого зависит, можно ли повторить попытку на той же сессии или нужно
+     * переподключаться заново.
+     */
+    @Test
+    fun probePairingRetryOnSameSocket() {
+        val host = System.getProperty("tv.host").orEmpty().ifBlank {
+            println("tvHost не задан — пропускаю")
+            return
+        }
+        val (context, clientCertificate) = freshClient()
+        val socket = connectTls(context, host, PAIRING_PORT, 8_000, 5 * 60 * 1000)
+        socket.use {
+            val serverCertificate =
+                socket.session.peerCertificates.first() as java.security.cert.X509Certificate
+            val stream = MessageStream(socket)
+
+            fun message() = com.sprit.tvremote.proto.polo.OuterMessage.newBuilder()
+                .setProtocolVersion(2)
+                .setStatus(com.sprit.tvremote.proto.polo.OuterMessage.Status.STATUS_OK)
+
+            fun encoding() = com.sprit.tvremote.proto.polo.Options.Encoding.newBuilder()
+                .setType(com.sprit.tvremote.proto.polo.Options.Encoding.EncodingType.ENCODING_TYPE_HEXADECIMAL)
+                .setSymbolLength(6)
+
+            fun findWrongPin(prefix: Int): Pair<String, ByteArray> =
+                (0..0xFFFF).asSequence()
+                    .map { suffix -> "%02X%04X".format(prefix, suffix) }
+                    .map { pin -> pin to PairingSecret.compute(pin, clientCertificate, serverCertificate) }
+                    .firstNotNullOf { (pin, secret) -> secret?.let { pin to it } }
+
+            stream.write(
+                message().setPairingRequest(
+                    com.sprit.tvremote.proto.polo.PairingRequest.newBuilder()
+                        .setClientName("Probe Client (retry same socket)")
+                        .setServiceName("atvremote"),
+                ).build().toByteArray(),
+            )
+
+            var attempt = 0
+            while (true) {
+                val raw = stream.read()
+                if (raw == null) {
+                    println("после попытки #$attempt телевизор закрыл соединение")
+                    return
+                }
+                val incoming = com.sprit.tvremote.proto.polo.OuterMessage.parseFrom(raw)
+                if (incoming.status == com.sprit.tvremote.proto.polo.OuterMessage.Status.STATUS_BAD_SECRET) {
+                    attempt += 1
+                    println("попытка #$attempt отвергнута (STATUS_BAD_SECRET), соединение ещё открыто")
+                    if (attempt >= 3) {
+                        println("три попытки на одной сессии прошли успешно — пробую ещё раз через 2 с (может, TV просто закроет позже)")
+                        Thread.sleep(2_000)
+                    }
+                    if (attempt >= 4) {
+                        println("итог: соединение переживает минимум $attempt отказов подряд")
+                        return
+                    }
+                    val (pin, secret) = findWrongPin(attempt)
+                    println("  пробую следующий заведомо неверный код: $pin")
+                    stream.write(
+                        message().setSecret(
+                            com.sprit.tvremote.proto.polo.Secret.newBuilder()
+                                .setSecret(com.google.protobuf.ByteString.copyFrom(secret)),
+                        ).build().toByteArray(),
+                    )
+                    continue
+                }
+                if (incoming.status != com.sprit.tvremote.proto.polo.OuterMessage.Status.STATUS_OK) {
+                    println("телевизор ответил статусом ${incoming.status}")
+                    return
+                }
+                when {
+                    incoming.hasPairingRequestAck() -> stream.write(
+                        message().setOptions(
+                            com.sprit.tvremote.proto.polo.Options.newBuilder()
+                                .setPreferredRole(com.sprit.tvremote.proto.polo.Options.RoleType.ROLE_TYPE_INPUT)
+                                .addInputEncodings(encoding()),
+                        ).build().toByteArray(),
+                    )
+                    incoming.hasOptions() -> stream.write(
+                        message().setConfiguration(
+                            com.sprit.tvremote.proto.polo.Configuration.newBuilder()
+                                .setClientRole(com.sprit.tvremote.proto.polo.Options.RoleType.ROLE_TYPE_INPUT)
+                                .setEncoding(encoding()),
+                        ).build().toByteArray(),
+                    )
+                    incoming.hasConfigurationAck() -> {
+                        val (pin, secret) = findWrongPin(0)
+                        println("отправляю первый заведомо неверный код: $pin")
+                        stream.write(
+                            message().setSecret(
+                                com.sprit.tvremote.proto.polo.Secret.newBuilder()
+                                    .setSecret(com.google.protobuf.ByteString.copyFrom(secret)),
+                            ).build().toByteArray(),
+                        )
+                    }
+                    incoming.hasSecretAck() -> {
+                        println("телевизор внезапно принял неверный код — баг телевизора")
+                        return
+                    }
+                    else -> {
+                        println("неожиданное сообщение: $incoming")
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Чем заставить телевизор прислать приглашение `remote_voice_begin`: перебираем кнопки и
      * способ нажатия. Приглашение — единственный признак, что телевизор действительно слушает.
      */
@@ -206,6 +411,51 @@ class LiveTvProbeTest {
         }
         session.sendKey(com.sprit.tvremote.proto.remote.RemoteKeyCode.KEYCODE_HOME)
         session.close()
+    }
+
+    /**
+     * Последняя проверка исправления на живом телевизоре: заведомо неверный код на первой
+     * попытке больше не должен убивать спаривание целиком. Сертификат телевизора для
+     * вычисления заведомо-неверного-но-корректно-оформленного кода подсматриваем отдельным
+     * соединением (сам [Pairing.pair] его наружу не отдаёт) — TLS-личность телевизора не
+     * меняется между подключениями, так что для второй попытки он тот же.
+     */
+    @Test
+    fun probePairingRecoversFromWrongCode() {
+        val host = System.getProperty("tv.host").orEmpty().ifBlank {
+            println("tvHost не задан — пропускаю")
+            return
+        }
+        val (context, clientCertificate) = freshClient()
+
+        val peekSocket = connectTls(context, host, PAIRING_PORT, 8_000, 5_000)
+        val serverCertificate = peekSocket.session.peerCertificates.first() as java.security.cert.X509Certificate
+        peekSocket.closeQuietly()
+
+        val wrongPin = (0..0xFFFF).asSequence()
+            .map { suffix -> "00%04X".format(suffix) }
+            .first { pin -> PairingSecret.compute(pin, clientCertificate, serverCertificate) != null }
+        println("заведомо неверный (но корректно оформленный) код для первой попытки: $wrongPin")
+
+        var attempt = 0
+        val error = runCatching {
+            kotlinx.coroutines.runBlocking {
+                Pairing.pair(host, context, clientCertificate) { deviceName, retry ->
+                    attempt += 1
+                    println("запрос кода #$attempt: устройство «$deviceName», retry=$retry")
+                    if (attempt == 1) wrongPin else null // на повторе отменяем сами
+                }
+            }
+        }.exceptionOrNull()
+
+        println("всего запросов кода: $attempt")
+        println(
+            when {
+                attempt < 2 -> "ФИКС НЕ РАБОТАЕТ: после отказа телевизора новый код не запрошен"
+                error is PairingCancelled -> "фикс работает: телевизор переподключился и запросил код заново"
+                else -> "неожиданный результат: ${error?.javaClass?.name}: ${error?.message}"
+            },
+        )
     }
 
     /**
